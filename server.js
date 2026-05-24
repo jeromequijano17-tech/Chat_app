@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -7,50 +8,92 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+
+const io = new Server(server, {
+    cors: {
+        origin: "*"
+    }
+});
 
 const PORT = process.env.PORT || 3000;
 
-// Serve static frontend files from the "public" folder
+// Serve frontend files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Create MySQL database connection pool
+// MySQL connection pool
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
+
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+
+    ssl: {
+        rejectUnauthorized: false
+    }
 });
 
-// Manage Socket.io connections
-io.on('connection', async (socket) => {
-    console.log('A user connected:', socket.id);
-
-    // 1. Fetch past messages from MySQL and send them to the newly connected user
+// Test DB connection
+(async () => {
     try {
-        const [rows] = await pool.query('SELECT username, message, created_at FROM messages ORDER BY id ASC LIMIT 50');
-        socket.emit('load history', rows);
+        const connection = await pool.getConnection();
+        console.log('✅ Connected to MySQL database');
+        connection.release();
     } catch (err) {
-        console.error('Error fetching chat history:', err);
+        console.error('❌ Database connection failed');
+        console.error(err);
+    }
+})();
+
+// Homepage
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Socket.io
+io.on('connection', async (socket) => {
+    console.log('User connected:', socket.id);
+
+    // Load old messages
+    try {
+        const [rows] = await pool.query(
+            'SELECT username, message, created_at FROM messages ORDER BY id ASC LIMIT 50'
+        );
+
+        socket.emit('load history', rows);
+
+    } catch (err) {
+        console.error('Error loading history:', err);
     }
 
-    // 2. Listen for incoming chat messages from clients
+    // Receive chat message
     socket.on('chat message', async (data) => {
-        const { username, message } = data;
+
+        const username = data.username;
+        const message = data.message;
 
         if (!username || !message) return;
 
-        // 3. Save the message to the MySQL database
         try {
-            await pool.query('INSERT INTO messages (username, message) VALUES (?, ?)', [username, message]);
-            
-            // 4. Broadcast the message to all connected clients (including the sender)
-            io.emit('chat message', { username, message });
+
+            // Save to database
+            await pool.query(
+                'INSERT INTO messages (username, message) VALUES (?, ?)',
+                [username, message]
+            );
+
+            // Broadcast to all users
+            io.emit('chat message', {
+                username,
+                message
+            });
+
         } catch (err) {
-            console.error('Error saving message to database:', err);
+            console.error('Error saving message:', err);
         }
     });
 
@@ -59,7 +102,7 @@ io.on('connection', async (socket) => {
     });
 });
 
-// Start the server
+// Start server
 server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
 });
